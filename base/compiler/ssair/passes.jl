@@ -269,7 +269,7 @@ function walk_to_defs(compact::IncrementalCompact, @nospecialize(defssa), @nospe
                             # path, with a different type constraint. We may have
                             # to redo some work here with the wider typeconstraint
                             push!(worklist_defs, new_def)
-                            push!(worklist_constraints, tmerge(new_constraint, visited_constraints[new_def]))
+                            push!(worklist_constraints, unwraptype(tmerge(new_constraint, visited_constraints[new_def])))
                         end
                         continue
                     end
@@ -511,7 +511,7 @@ function lift_comparison!(compact::IncrementalCompact,
     # Let's check if we evaluate the comparison for each one of the leaves
     lifted_leaves = nothing
     for leaf in leaves
-        r = egal_tfunc(argextype(leaf, compact), cmp)
+        r = egal_tfunc(unwraptype(argextype(leaf, compact)), cmp)
         if isa(r, Const)
             if lifted_leaves === nothing
                 lifted_leaves = LiftedLeaves()
@@ -842,7 +842,7 @@ function sroa_mutables!(ir::IRCode, defuses::IdDict{Int, Tuple{SPCSet, SSADefUse
         defexpr = ir[SSAValue(idx)]
         isexpr(defexpr, :new) || continue
         newidx = idx
-        typ = ir.stmts[newidx][:type]
+        typ = widenconst(ir.stmts[newidx][:type])
         if isa(typ, UnionAll)
             typ = unwrap_unionall(typ)
         end

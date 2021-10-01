@@ -69,8 +69,8 @@ end
 
 # Tests for SROA
 
-import Core.Compiler: argextype, singleton_type
-const EMPTY_SPTYPES = Any[]
+import Core.Compiler: argextype, singleton_type, Argtypes
+const EMPTY_SPTYPES = Argtypes()
 
 code_typed1(args...; kwargs...) = first(only(code_typed(args...; kwargs...)))::Core.CodeInfo
 get_code(args...; kwargs...) = code_typed1(args...; kwargs...).code
@@ -405,7 +405,9 @@ let m = Meta.@lower 1 + 1
     nstmts = length(src.code)
     src.codelocs = fill(Int32(1), nstmts)
     src.ssaflags = fill(Int32(0), nstmts)
-    ir = Core.Compiler.inflate_ir(src, Any[], Any[Any, Any])
+    ir = Core.Compiler.inflate_ir(src,
+        Core.Compiler.AbstractLattice[],
+        Core.Compiler.AbstractLattice[Core.Compiler.NativeType(Any), Core.Compiler.NativeType(Any)])
     @test Core.Compiler.verify_ir(ir) === nothing
     ir = @test_nowarn Core.Compiler.sroa_pass!(ir)
     @test Core.Compiler.verify_ir(ir) === nothing
@@ -628,7 +630,7 @@ let # `sroa_pass!` should work with constant globals
     @test !any(src.code) do @nospecialize(stmt)
         Meta.isexpr(stmt, :call) || return false
         ft = Core.Compiler.argextype(stmt.args[1], src, EMPTY_SPTYPES)
-        return Core.Compiler.widenconst(ft) == typeof(getfield)
+        return Core.Compiler.widenconst(ft) == Core.Compiler.NativeType(typeof(getfield))
     end
     @test !any(src.code) do @nospecialize(stmt)
         return Meta.isexpr(stmt, :new)
@@ -646,7 +648,7 @@ let # `sroa_pass!` should work with constant globals
     @test !any(src.code) do @nospecialize(stmt)
         Meta.isexpr(stmt, :call) || return false
         ft = Core.Compiler.argextype(stmt.args[1], src, EMPTY_SPTYPES)
-        return Core.Compiler.widenconst(ft) == typeof(getfield)
+        return Core.Compiler.widenconst(ft) == Core.Compiler.NativeType(typeof(getfield))
     end
     @test !any(src.code) do @nospecialize(stmt)
         return Meta.isexpr(stmt, :new)
