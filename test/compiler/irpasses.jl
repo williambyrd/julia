@@ -4,7 +4,29 @@ using Test
 using Base.Meta
 using Core: PhiNode, SSAValue, GotoNode, PiNode, QuoteNode, ReturnNode, GotoIfNot
 
-# Tests for domsort
+# utilities
+# =========
+
+import Core.Compiler: argextype, singleton_type
+const EMPTY_SPTYPES = Core.Compiler.EMPTY_SLOTTYPES
+
+code_typed1(args...; kwargs...) = first(only(code_typed(args...; kwargs...)))::Core.CodeInfo
+get_code(args...; kwargs...) = code_typed1(args...; kwargs...).code
+
+# check if `x` is a statement with a given `head`
+isnew(@nospecialize x) = Meta.isexpr(x, :new)
+
+# check if `x` is a dynamic call of a given function
+iscall(y) = @nospecialize(x) -> iscall(y, x)
+function iscall((src, f)::Tuple{Core.CodeInfo,Function}, @nospecialize(x))
+    return iscall(x) do @nospecialize x
+        singleton_type(argextype(x, src, EMPTY_SPTYPES)) === f
+    end
+end
+iscall(pred::Function, @nospecialize(x)) = Meta.isexpr(x, :call) && pred(x.args[1])
+
+# domsort
+# =======
 
 ## Test that domsort doesn't mangle single-argument phis (#29262)
 let m = Meta.@lower 1 + 1
@@ -67,25 +89,8 @@ let m = Meta.@lower 1 + 1
     Core.Compiler.verify_ir(ir)
 end
 
-# Tests for SROA
-
-import Core.Compiler: argextype, singleton_type
-const EMPTY_SPTYPES = Core.Compiler.EMPTY_SLOTTYPES
-
-code_typed1(args...; kwargs...) = first(only(code_typed(args...; kwargs...)))::Core.CodeInfo
-get_code(args...; kwargs...) = code_typed1(args...; kwargs...).code
-
-# check if `x` is a statement with a given `head`
-isnew(@nospecialize x) = Meta.isexpr(x, :new)
-
-# check if `x` is a dynamic call of a given function
-iscall(y) = @nospecialize(x) -> iscall(y, x)
-function iscall((src, f)::Tuple{Core.CodeInfo,Function}, @nospecialize(x))
-    return iscall(x) do @nospecialize x
-        singleton_type(argextype(x, src, EMPTY_SPTYPES)) === f
-    end
-end
-iscall(pred::Function, @nospecialize(x)) = Meta.isexpr(x, :call) && pred(x.args[1])
+# SROA
+# ====
 
 struct ImmutableXYZ; x; y; z; end
 mutable struct MutableXYZ; x; y; z; end
@@ -277,6 +282,50 @@ let src = code_typed1((Any,Any,Any)) do x, y, z
     @test_broken !any(isnew, src.code)
 end
 
+let # should work with constant globals
+    # immutable case
+    # --------------
+    src = @eval Module() begin
+        const REF_FLD = :x
+        struct ImmutableRef{T}
+            x::T
+        end
+
+        code_typed((Int,)) do x
+            r = ImmutableRef{Int}(x) # should be eliminated
+            x = getfield(r, REF_FLD) # should be eliminated
+            return sin(x)
+        end |> only |> first
+    end
+    @test !any(src.code) do @nospecialize(stmt)
+        Meta.isexpr(stmt, :call) || return false
+        ft = Core.Compiler.argextype(stmt.args[1], src, Any[], src.slottypes)
+        return Core.Compiler.widenconst(ft) == typeof(getfield)
+    end
+    @test !any(src.code) do @nospecialize(stmt)
+        return Meta.isexpr(stmt, :new)
+    end
+
+    # mutable case
+    # ------------
+    src = @eval Module() begin
+        const REF_FLD = :x
+        code_typed() do
+            r = Ref{Int}(42) # should be eliminated
+            x = getfield(r, REF_FLD) # should be eliminated
+            return sin(x)
+        end |> only |> first
+    end
+    @test !any(src.code) do @nospecialize(stmt)
+        Meta.isexpr(stmt, :call) || return false
+        ft = Core.Compiler.argextype(stmt.args[1], src, Any[], src.slottypes)
+        return Core.Compiler.widenconst(ft) == typeof(getfield)
+    end
+    @test !any(src.code) do @nospecialize(stmt)
+        return Meta.isexpr(stmt, :new)
+    end
+end
+
 # should work nicely with inlining to optimize away a complicated case
 # adapted from http://wiki.luajit.org/Allocation-Sinking-Optimization#implementation%5B
 struct Point
@@ -294,6 +343,75 @@ function compute()
 end
 let src = code_typed1(compute)
     @test !any(isnew, src.code)
+end
+
+# comparison lifting
+# ==================
+
+let # lifting `===`
+    src = code_typed1((Bool,Int,)) do c, x
+        y = c ? x : nothing
+        y === nothing # => ϕ(false, true)
+    end
+    @test !any(iscall((src, ===)), src.code)
+
+    # should optimize away the iteration protocol
+    src = code_typed1((Int,)) do n
+        s = 0
+        for i in 1:n
+            s += i
+        end
+        s
+    end
+    @test !any(src.code) do @nospecialize x
+        iscall((src, ===), x) && argextype(x.args[2], src, EMPTY_SPTYPES) isa Union
+    end
+end
+
+let # lifting `isa`
+    src = code_typed1((Bool,Int,)) do c, x
+        y = c ? x : nothing
+        isa(y, Int) # => ϕ(true, false)
+    end
+    @test !any(iscall((src, isa)), src.code)
+
+    src = code_typed1((Int,)) do n
+        s = 0
+        itr = 1:n
+        st = iterate(itr)
+        while !isa(st, Nothing)
+            i, st = itr
+            s += i
+            st = iterate(itr, st)
+        end
+        s
+    end
+    @test !any(src.code) do @nospecialize x
+        iscall((src, isa), x) && argextype(x.args[2], src, EMPTY_SPTYPES) isa Union
+    end
+end
+
+let # lifting `isdefined`
+    src = code_typed1((Bool,Some{Int},)) do c, x
+        y = c ? x : nothing
+        isdefined(y, 1) # => ϕ(true, false)
+    end
+    @test !any(iscall((src, isdefined)), src.code)
+
+    src = code_typed1((Int,)) do n
+        s = 0
+        itr = 1:n
+        st = iterate(itr)
+        while isdefined(st, 2)
+            i, st = itr
+            s += i
+            st = iterate(itr, st)
+        end
+        s
+    end
+    @test !any(src.code) do @nospecialize x
+        iscall((src, isdefined), x) && argextype(x.args[2], src, EMPTY_SPTYPES) isa Union
+    end
 end
 
 mutable struct Foo30594; x::Float64; end
@@ -610,48 +728,6 @@ exc39508 = ErrorException("expected")
     return err
 end
 @test test39508() === exc39508
-
-let # `sroa_pass!` should work with constant globals
-    # immutable pass
-    src = @eval Module() begin
-        const REF_FLD = :x
-        struct ImmutableRef{T}
-            x::T
-        end
-
-        code_typed((Int,)) do x
-            r = ImmutableRef{Int}(x) # should be eliminated
-            x = getfield(r, REF_FLD) # should be eliminated
-            return sin(x)
-        end |> only |> first
-    end
-    @test !any(src.code) do @nospecialize(stmt)
-        Meta.isexpr(stmt, :call) || return false
-        ft = Core.Compiler.argextype(stmt.args[1], src, Any[], src.slottypes)
-        return Core.Compiler.widenconst(ft) == typeof(getfield)
-    end
-    @test !any(src.code) do @nospecialize(stmt)
-        return Meta.isexpr(stmt, :new)
-    end
-
-    # mutable pass
-    src = @eval Module() begin
-        const REF_FLD = :x
-        code_typed() do
-            r = Ref{Int}(42) # should be eliminated
-            x = getfield(r, REF_FLD) # should be eliminated
-            return sin(x)
-        end |> only |> first
-    end
-    @test !any(src.code) do @nospecialize(stmt)
-        Meta.isexpr(stmt, :call) || return false
-        ft = Core.Compiler.argextype(stmt.args[1], src, Any[], src.slottypes)
-        return Core.Compiler.widenconst(ft) == typeof(getfield)
-    end
-    @test !any(src.code) do @nospecialize(stmt)
-        return Meta.isexpr(stmt, :new)
-    end
-end
 
 let
     # `typeassert` elimination after SROA
