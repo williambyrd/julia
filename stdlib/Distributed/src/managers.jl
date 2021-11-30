@@ -462,10 +462,29 @@ function launch(manager::LocalManager, params::Dict, launched::Array, c::Conditi
     exename = params[:exename]
     exeflags = params[:exeflags]
     bind_to = manager.restrict ? `127.0.0.1` : `$(LPROC.bind_addr)`
+    env = Dict{String,String}(params[:env])
+
+    # JULIA_(LOAD|DEPOT)_PATH are used to populate (LOAD|DEPOT)_PATH on startup,
+    # but since (LOAD|DEPOT)_PATH might have changed they are re-serialized here.
+    # Users can opt-out of this by passing `env = ...` to addprocs(...).
+    pathsep = Sys.iswindows() ? ";" : ":"
+    if get(env, "JULIA_LOAD_PATH", nothing) === nothing
+        env["JULIA_LOAD_PATH"] = join(LOAD_PATH, pathsep)
+    end
+    if get(env, "JULIA_DEPOT_PATH", nothing) === nothing
+        env["JULIA_DEPOT_PATH"] = join(DEPOT_PATH, pathsep)
+    end
+    # Set the active project on workers using JULIA_PROJECT.
+    # Users can opt-out of this by (i) passing `env = ...` or (ii) passing
+    # `--project=...` as `exeflags` to addprocs(...).
+    project = Base.ACTIVE_PROJECT[]
+    if project !== nothing && get(env, "JULIA_PROJECT", nothing) === nothing
+        env["JULIA_PROJECT"] = project
+    end
 
     for i in 1:manager.np
         cmd = `$(julia_cmd(exename)) $exeflags --bind-to $bind_to --worker`
-        io = open(detach(setenv(cmd, dir=dir)), "r+")
+        io = open(detach(setenv(addenv(cmd, env), dir=dir)), "r+")
         write_cookie(io)
 
         wconfig = WorkerConfig()

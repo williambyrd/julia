@@ -129,6 +129,9 @@ Standard library changes
 #### Tar
 
 #### Distributed
+* The package environment (active project, `LOAD_PATH`, `DEPOT_PATH`) are now propagated
+  when adding *local* workers (e.g. with `addprocs(N::Int)` or through the `--procs=N`
+  command line flag). ([#43270]).
 
 #### UUIDs
 
