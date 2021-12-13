@@ -492,11 +492,18 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q)
                 return task;
             }
 
-            // one thread should win this race and watch the event loop
-            // inside a threaded region, any thread can listen for IO messages,
-            // although none are allowed to create new ones
-            // outside of threaded regions, all IO is permitted,
-            // but only on thread 1
+            // one thread should win this race and watch the event loop inside
+            // a threaded region, any thread can listen for IO messages,
+            // although none are allowed to create new ones outside of threaded
+            // regions, all IO is permitted, but only on thread 1
+            // the reason this works is somewhat convoluted:
+            //  - only thread 0 is permitted to change _threadedregion,
+            //  so it will definitely acquire the unconditional lock after
+            //  switching that flag
+            //  - inside a _threadedregion, there must exist at least one
+            //  thread that has a happens-before relationship on the libuv lock
+            //  before reaching this decision point in the code who will see
+            //  the lock as unlocked and thus must win this race here
             int uvlock = 0;
             if (jl_atomic_load_relaxed(&_threadedregion)) {
                 uvlock = jl_mutex_trylock(&jl_uv_mutex);
@@ -507,42 +514,32 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q)
             }
             if (uvlock) {
                 int active = 1;
-                if (jl_atomic_load(&jl_uv_n_waiters) != 0) {
-                    // but if we won the race against someone who actually needs
-                    // the lock to do real work, we need to let them have it instead
-                    JL_UV_UNLOCK();
-                }
-                else {
-                    // otherwise, we may block until someone asks us for the lock
-                    uv_loop_t *loop = jl_global_event_loop();
+                // otherwise, we block until someone asks us for the lock
+                uv_loop_t *loop = jl_global_event_loop();
+                while (active && may_sleep(ptls)) {
+                    if (jl_atomic_load_relaxed(&jl_uv_n_waiters) != 0)
+                        // but if we won the race against someone who actually needs
+                        // the lock to do real work, we need to let them have it instead
+                        break;
+                    loop->stop_flag = 0;
+                    JULIA_DEBUG_SLEEPWAKE( ptls->uv_run_enter = cycleclock() );
+                    active = uv_run(loop, UV_RUN_ONCE);
+                    JULIA_DEBUG_SLEEPWAKE( ptls->uv_run_leave = cycleclock() );
                     jl_gc_safepoint();
-                    if (may_sleep(ptls)) {
-                        loop->stop_flag = 0;
-                        JULIA_DEBUG_SLEEPWAKE( ptls->uv_run_enter = cycleclock() );
-                        active = uv_run(loop, UV_RUN_ONCE);
-                        JULIA_DEBUG_SLEEPWAKE( ptls->uv_run_leave = cycleclock() );
-                    }
-                    JL_UV_UNLOCK();
-                    // optimization: check again first if we may have work to do
-                    if (!may_sleep(ptls)) {
-                        assert(jl_atomic_load_relaxed(&ptls->sleep_check_state) == not_sleeping);
-                        start_cycles = 0;
-                        continue;
-                    }
-                    // otherwise, we got a spurious wakeup since some other
-                    // thread that just wanted to steal libuv from us,
-                    // just go right back to sleep on the other wake signal
-                    // to let them take it from us without conflict
-                    // TODO: this relinquishes responsibility for all event
-                    //       to the last thread to do an explicit operation,
-                    //       which may starve other threads of critical work
-                    if (jl_atomic_load(&jl_uv_n_waiters) == 0) {
-                        continue;
-                    }
+                }
+                JL_UV_UNLOCK();
+                // optimization: check again first if we may have work to do.
+                // Otherwise we got a spurious wakeup since some other thread
+                // that just wanted to steal libuv from us. We will just go
+                // right back to sleep on the individual wake signal to let
+                // them take it from us without conflict.
+                if (!may_sleep(ptls)) {
+                    start_cycles = 0;
+                    continue;
                 }
                 if (!jl_atomic_load_relaxed(&_threadedregion) && active && ptls->tid == 0) {
                     // thread 0 is the only thread permitted to run the event loop
-                    // so it needs to stay alive
+                    // so it needs to stay alive, just spin-looping if necessary
                     if (jl_atomic_load_relaxed(&ptls->sleep_check_state) != not_sleeping)
                         jl_atomic_store_relaxed(&ptls->sleep_check_state, not_sleeping); // let other threads know they don't need to wake us
                     start_cycles = 0;
@@ -550,7 +547,7 @@ JL_DLLEXPORT jl_task_t *jl_task_get_next(jl_value_t *trypoptask, jl_value_t *q)
                 }
             }
 
-            // the other threads will just wait for on signal to resume
+            // the other threads will just wait for an individual wake signal to resume
             JULIA_DEBUG_SLEEPWAKE( ptls->sleep_enter = cycleclock() );
             int8_t gc_state = jl_gc_safe_enter(ptls);
             uv_mutex_lock(&sleep_locks[ptls->tid]);

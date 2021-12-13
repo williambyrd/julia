@@ -537,11 +537,15 @@ JL_DLLEXPORT int jl_in_threaded_region(void)
 
 JL_DLLEXPORT void jl_enter_threaded_region(void)
 {
+    if (jl_atomic_load_relaxed(&jl_current_task->tid) != 0)
+        return;
     jl_atomic_fetch_add(&_threadedregion, 1);
 }
 
 JL_DLLEXPORT void jl_exit_threaded_region(void)
 {
+    if (jl_atomic_load_relaxed(&jl_current_task->tid) != 0)
+        return;
     jl_atomic_fetch_add(&_threadedregion, -1);
     jl_wake_libuv();
     // make sure no more callbacks will run while user code continues
