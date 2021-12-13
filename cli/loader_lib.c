@@ -198,6 +198,11 @@ __attribute__((constructor)) void jl_load_libjulia_internal(void) {
 
     // Unpack our special library names.  This is why ordering of library names matters.
     libjulia_internal = load_library(special_library_names[0], lib_dir, 1);
+
+    void (*pZN4llvm2cl22ResetCommandLineParserEv)(void) = (void (*)(void))lookup_symbol(libjulia_internal, "_ZN4llvm2cl22ResetCommandLineParserEv");
+    if (pZN4llvm2cl22ResetCommandLineParserEv)
+       pZN4llvm2cl22ResetCommandLineParserEv();
+
     void *libjulia_codegen = load_library(special_library_names[1], lib_dir, 0);
     const char * const * codegen_func_names;
     if (libjulia_codegen == NULL) {
