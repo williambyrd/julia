@@ -243,9 +243,7 @@ isAnyConditional(typ::LatticeElement) = hasConditional(typ)
 # all usages of this function can be simply replaced with `x.conditional`
 @inline conditional((; conditional)::LatticeElement) = (@assert !conditional.inter; conditional)
 @inline interconditional((; conditional)::LatticeElement) = (@assert conditional.inter; conditional)
-widenconditional(@nospecialize typ) = typ
-widenconditional(typ::LatticeElement) = isAnyConditional(typ) ? _widenconditional(typ) : typ
-_widenconditional(typ::LatticeElement) = LatticeElement(typ; conditional = __NULL_CONDITIONAL__)
+widenconditional(typ::LatticeElement) = isAnyConditional(typ) ? LatticeElement(typ; conditional = __NULL_CONDITIONAL__) : typ
 
 function PartialTypeVar(
     tv::TypeVar,

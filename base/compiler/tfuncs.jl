@@ -224,24 +224,22 @@ end
 add_tfunc(Core.ifelse, 3, 3, ifelse_tfunc, 1)
 
 function egal_tfunc(@nospecialize(x), @nospecialize(y))
-    xx = widenconditional(x)
-    yy = widenconditional(y)
-    if isConditional(x) && isConst(yy)
+    if isConditional(x) && isConst(y)
         cnd = conditional(x)
-        constant(yy) === false && return Conditional(cnd.slot_id, cnd.elsetype, cnd.vtype)
-        constant(yy) === true && return x
+        constant(y) === false && return Conditional(cnd.slot_id, cnd.elsetype, cnd.vtype)
+        constant(y) === true && return x
         return Const(false)
-    elseif isConditional(y) && isConst(xx)
+    elseif isConditional(y) && isConst(x)
         cnd = conditional(y)
-        constant(xx) === false && return Conditional(cnd.slot_id, cnd.elsetype, cnd.vtype)
-        constant(xx) === true && return y
+        constant(x) === false && return Conditional(cnd.slot_id, cnd.elsetype, cnd.vtype)
+        constant(x) === true && return y
         return Const(false)
-    elseif isConst(xx) && isConst(yy)
-        return Const(constant(xx) === constant(yy))
-    elseif !hasintersect(widenconst(xx), widenconst(yy))
+    elseif isConst(x) && isConst(y)
+        return Const(constant(x) === constant(y))
+    elseif !hasintersect(widenconst(x), widenconst(y))
         return Const(false)
-    elseif (isConst(xx) && y === typeof(constant(xx)) && isdefined(y, :instance)) ||
-           (isConst(yy) && x === typeof(constant(yy)) && isdefined(x, :instance))
+    elseif (isConst(x) && y === typeof(constant(x)) && isdefined(y, :instance)) ||
+           (isConst(y) && x === typeof(constant(y)) && isdefined(x, :instance))
         return Const(true)
     end
     return Bool
@@ -1177,7 +1175,7 @@ function apply_type_nothrow(argtypes::Array{Any, 1}, @nospecialize(rt))
     u = headtype
     for i = 2:length(argtypes)
         isa(u, UnionAll) || return false
-        ai = widenconditional(argtypes[i])
+        ai = argtypes[i]
         if ai ⊑ TypeVar || ai === DataType
             # We don't know anything about the bounds of this typevar, but as
             # long as the UnionAll is not constrained, that's ok.
@@ -1289,7 +1287,7 @@ function apply_type_tfunc(@nospecialize(headtypetype), @nospecialize args...)
     varnamectr = 1
     ua = headtype
     for i = 1:largs
-        ai = widenconditional(args[i])
+        ai = args[i]
         if isType(ai)
             aip1 = ai.parameters[1]
             canconst &= !has_free_typevars(aip1)
@@ -1380,17 +1378,10 @@ function apply_type_tfunc(@nospecialize(headtypetype), @nospecialize args...)
 end
 add_tfunc(apply_type, 1, INT_INF, apply_type_tfunc, 10)
 
-function has_struct_const_info(@nospecialize x)
-    isPartialTypeVar(x) && return true
-    isConditional(x) && return true
-    return has_nontrivial_const_info(x)
-end
-
 # convert the dispatch tuple type argtype to the real (concrete) type of
 # the tuple of those values
 tuple_tfunc(argtypes::Argtypes) = tuple_tfunc(Any[a for a in argtypes])
 function tuple_tfunc(argtypes::Vector{Any})
-    argtypes = anymap(widenconditional, argtypes)
     all_are_const = true
     for i in 1:length(argtypes)
         if !isConst(argtypes[i])
@@ -1405,7 +1396,10 @@ function tuple_tfunc(argtypes::Vector{Any})
     anyinfo = false
     for i in 1:length(argtypes)
         x = argtypes[i]
-        if has_struct_const_info(x)
+        # `PartialStruct` doesn't wrap `Conditional`, widen here
+        # TODO (lattice-overhaul) just `widenconditional` unconditionally (don't work on native types here)
+        isConditional(x) && (argtypes[i] = x = widenconditional(x))
+        if has_nontrivial_const_info(x) || isPartialTypeVar(x)
             anyinfo = true
         else
             if !isVararg(x)
@@ -1736,7 +1730,7 @@ function return_type_tfunc(interp::AbstractInterpreter, argtypes::Argtypes, sv::
                     end
                     call = abstract_call(interp, ArgInfo(nothing, argtypes), sv, -1)
                     info = verbose_stmt_info(interp) ? ReturnTypeCallInfo(call.info) : false
-                    rt = widenconditional(call.rt) # TODO (lattice overhaul) remove this sort of "maybe" `widenconditional` calls
+                    rt = call.rt
                     if isConst(rt)
                         # output was computed to be constant
                         return CallMeta(Const(typeof(constant(rt))), info)

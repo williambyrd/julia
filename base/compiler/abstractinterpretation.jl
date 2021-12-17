@@ -712,7 +712,6 @@ function const_prop_argument_heuristic(_::AbstractInterpreter, (; fargs, argtype
         if isConditional(a) && fargs !== nothing
             is_const_prop_profitable_conditional(conditional(a), fargs, sv) && return true
         else
-            a = widenconditional(a)
             has_nontrivial_const_info(a) && is_const_prop_profitable_arg(a) && return true
         end
     end
@@ -1149,13 +1148,14 @@ is_method_pure(match::MethodMatch) = is_method_pure(match.method, match.spec_typ
 
 function pure_eval_call(@nospecialize(f), argtypes::Argtypes)
     for i = 2:length(argtypes)
-        a = widenconditional(argtypes[i])
+        a = argtypes[i]
         if !(isConst(a) || isconstType(widenconst(a)))
             return nothing
         end
     end
 
-    args = Any[ (a = widenconditional(argtypes[i]); isConst(a) ? constant(a) : (widenconst(a)::Type).parameters[1]) for i in 2:length(argtypes) ]
+    args = Any[ (a = argtypes[i]; isConst(a) ? constant(a) : (widenconst(a)::Type).parameters[1])
+        for i in 2:length(argtypes) ]
     try
         value = Core._apply_pure(f, args)
         return Const(value)
@@ -1191,12 +1191,11 @@ function abstract_call_builtin(
         typ = argtypes[2]
         if isConditional(typ)
             cnd = conditional(typ)
-            newtyp = widenconditional(typ)
             tx = argtypes[3]
             ty = argtypes[4]
-            if isConst(newtyp)
+            if isConst(typ)
                 # if `cnd` is constant, we should just respect its constantness to keep inference accuracy
-                return constant(newtyp)::Bool ? tx : ty
+                return constant(typ)::Bool ? tx : ty
             else
                 # try to simulate this as a real conditional (`cnd ? x : y`), so that the penalty for using `ifelse` instead isn't too high
                 a = ssa_def_slot(fargs[3], sv)
